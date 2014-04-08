@@ -1,0 +1,961 @@
+<!doctype html>
+<html lang="en">
+<head>
+
+	<meta charset="utf-8">
+	<title>Delivery Route Planner</title>
+
+	<script src="js/jquery-1.10.2.js" type="text/javascript" charset="utf-8"></script>
+
+	<script src="js/jquery-ui-1.10.4.custom.js" type="text/javascript" charset="utf-8"></script>
+	<link rel="stylesheet" href="css/ui-lightness/jquery-ui-1.10.4.custom.css" type="text/css" media="screen" title="no title" charset="utf-8">
+
+	<script src="js/jquery.csv-0.71.js" type="text/javascript" charset="utf-8"></script>
+	
+	<script type="text/javascript" src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBxZo9p7bRsRNMd6oO1lEZN4M9nSgeu-C4&sensor=true"></script>
+	<script src="js/gmap-pushpin-icons.js" type="text/javascript" charset="utf-8"></script>
+
+	<link rel="stylesheet" href="css/routeplanner.css" type="text/css" media="screen" title="no title" charset="utf-8">
+
+<!--********************************************************-->
+	<script>
+
+	//----------------------------------------------------------------
+	
+	
+	// define Boston's Latitude and Longitude
+	var bostonLatLng = new google.maps.LatLng(42.3584308, -71.0597732);
+	
+	
+	// init google map Geocoder
+	var geocoder;
+	google.maps.event.addDomListener(window, 'load', function(){
+		  geocoder = new google.maps.Geocoder();
+	});
+	
+	
+	// create info window for map markers
+	infoWindow = new google.maps.InfoWindow({
+		content: 'loading...'
+	});
+
+
+	// to initialize a google map
+	function initGoogleMap(mapDomId){
+		var mapOptions = {
+			zoom: 9,
+			center: bostonLatLng,
+			mapTypeId: google.maps.MapTypeId.ROADMAP
+		}
+		return new google.maps.Map(document.getElementById(mapDomId), mapOptions);
+	}
+
+	
+	// init google map on sort tab
+	var sortMap;
+	google.maps.event.addDomListener(window, 'load', function(){
+		sortMap = initGoogleMap('sort-map-canvas');
+	});
+
+	
+	// object to handle mapping markers of addresses
+	markerMapper = {
+		map: null,				// map to be marked
+		addressQueue: [],		// addresses to be mapped
+		timer: null,			// timer to trigger address marking
+		timerInterval: 1000,	// time interval of timer
+		markers: {},			// markers that have been created
+		callbackForOne: function(){}, // executes after a marker is created
+		callbackForAll: function(){}, // executes after all markers in the queue have been created
+		
+		// create pushpin marker on given map at given address
+		createAddressMarker: function (map, address, icon, callback) {
+			if(callback){
+				this.callbackForOne = callback;
+			} else {
+				this.callbackForOne = function(){};
+			}
+
+			// geocode address
+			geocoder.geocode( {'address': address}, function(results, status) {
+
+				if (status == google.maps.GeocoderStatus.OK) {
+					//map.setCenter(results[0].geometry.location);
+
+					// create new marker
+					var marker = new google.maps.Marker({
+						map: map,
+						position: results[0].geometry.location,
+						icon: icon
+					});
+					
+					// save marker
+					markerMapper.markers[address] = marker;
+					
+					// callback
+					markerMapper.callbackForOne();
+
+				} else {
+					alert('Geocode was not successful for the following reason: ' + status);
+				}
+			});		
+
+		},
+		
+		// create pushpin marker on given map for the next address in queue
+		createMarkerForNextAddressInQueue: function (map, icon) {
+			if (this.addressQueue.length > 0) {
+				var address = this.addressQueue.pop();
+				this.createAddressMarker(map, address, icon);
+			} else {
+				clearInterval(this.timer);
+				this.callbackForAll();
+			}
+		},
+		
+		// start timer that tiggers the marker creation for the next address in queue
+		startCreatingMarkersForAddressesInQueue: function (map, icon) {
+			this.createMarkerForNextAddressInQueue(map, icon);
+			this.timer = setInterval( function(){ markerMapper.createMarkerForNextAddressInQueue(markerMapper.map, icon) }, this.timerInterval );
+		},
+		
+		// creates pushpin markers on the given map for the given addresses
+		createAddressMarkers: function (map, addresses, icon, callback) {
+			if(callback){
+				this.callbackForAll = callback;
+			} else {
+				this.callbackForAll = function(){};
+			}
+			this.map = map;
+			this.addressQueue = addresses;
+			this.startCreatingMarkersForAddressesInQueue(map, icon);
+		}
+	}
+	
+		
+	// object to handle mapping of route directions
+	directionsMapper = {
+		directionsService: new google.maps.DirectionsService(), // direction service
+		map: null,				// map to be used
+		polyline: null,			// polyline to be used
+		requestQueue: [],		// directions to be mapped
+		routeDuration: 0,		// total time of route
+		routeDistance: 0,		// total distance of route
+		timer: null,			// timer to trigger address marking
+		timerInterval: 1000,	// time interval of timer
+		callbackForOne: function(){}, // executes after one request is fullfilled
+		callbackForAll: function(){}, // executes after all requests in the queue have been fullfilled
+		
+		// send a request for directions
+		sendDirectionsRequest: function(origin, destination) {
+			// format request
+			var request = {
+				origin:origin,
+				destination:destination,
+				travelMode: google.maps.TravelMode.DRIVING
+			};
+			// send request
+			this.directionsService.route(request, function(response, status) {
+				// check that response is ok
+				if (status == google.maps.DirectionsStatus.OK) {
+					// add to total distance and duration of route
+					directionsMapper.routeDistance += response.routes[0].legs[0].distance.value;
+					directionsMapper.routeDuration += response.routes[0].legs[0].duration.value;
+					// display route on map
+					directionsMapper.displayDirectionsResponse(response);
+				} 
+			});			
+		},
+		
+		// display response to directions request
+		displayDirectionsResponse: function(response) {
+			//var bounds = new google.maps.LatLngBounds();
+			var legs = response.routes[0].legs;
+			for (i=0;i<legs.length;i++) {
+				var steps = legs[i].steps;
+				for (j=0;j<steps.length;j++) {
+					var nextSegment = steps[j].path;
+					for (k=0;k<nextSegment.length;k++) {
+						this.polyline.getPath().push(nextSegment[k]);
+						//bounds.extend(nextSegment[k]);
+					}
+				}
+			}
+			this.polyline.setMap(this.map);
+			//this.map.fitBounds(bounds);
+		},
+		
+		// send the next direction request in the queue
+		sendNextDirectionRequestInQueue: function() {
+			if (this.requestQueue.length > 0) {
+				var request = this.requestQueue.pop();
+				this.sendDirectionsRequest(request.origin, request.destination);
+			} else {
+				clearInterval(this.timer);
+				this.callbackForAll();
+			}
+		},
+		
+		// start timer that tiggers the next request in the queue
+		startSendingDirectionRequestsInQueue: function () {
+			this.sendNextDirectionRequestInQueue();
+			this.timer = setInterval( function(){ directionsMapper.sendNextDirectionRequestInQueue() }, this.timerInterval );
+		},
+		
+		// on the given map, set the given polyline to follow the paths of the responses of the given requests
+		mapDirectionsRequests: function (map, polyline, requests, callback) {
+			// set callback function if provided
+			if(callback){
+				this.callbackForAll = callback;
+			} else {
+				this.callbackForAll = function(){};
+			}
+			
+			// reverse requests for proper popping from request queue
+			requests.reverse();
+			
+			// set vars
+			this.map = map;
+			this.polyline = polyline;
+			this.requestQueue = requests;
+			this.routeDistance = 0;
+			this.routeDuration = 0;
+			
+			// start mapping direction requests
+			this.startSendingDirectionRequestsInQueue();
+		},
+		
+		// on the given map, set the given polyline to follow the path of the route defined by the given addresses
+		mapRoute: function(map, polyline, addresses, callback) {
+			// create direction requests from list of addresses
+			var requests = [];
+			for (var i=0; i<addresses.length-1; i++) {
+				requests.push({
+					origin: addresses[i],
+					destination: addresses[i+1]
+				})
+			}
+
+			// start mapping direction requests
+			this.mapDirectionsRequests(map, polyline, requests, callback);
+		}
+		
+	}
+	
+	
+	//----------------------------------------------------------------
+
+	// data associated with delivery locations (locales)
+	var locales = null;
+
+	// import locales
+	function importLocales() {
+
+		// get csv text
+		var csvText = $("#locales-csv-text").val();
+		
+		// convert csv to array of objects
+		var csvRows = $.csv.toObjects(csvText);
+		
+		// init locales var
+		locales = new Array;
+		
+		// create new locale
+		for (var i=0; i<csvRows.length; i++) {
+			locales[csvRows[i]['ID']] = {
+				id: csvRows[i]['ID'],
+				firstName: csvRows[i]['First Name'],
+				lastName: csvRows[i]['Last Name'],
+				address: csvRows[i]['Address'],
+				city: csvRows[i]['City'],
+				state: csvRows[i]['State'],
+				zip: csvRows[i]['Zip Code'],
+				fullAddress: csvRows[i]['Address'] + ', ' + csvRows[i]['City'] + ', ' + csvRows[i]['State'] + ' ' + csvRows[i]['Zip Code'],
+				importTableId: 'import-table-row-' + csvRows[i]['ID'],
+				sortMapMarker: null, //created when mapped on the sort map
+				routeMapMarker: null, //created when mapped on a route map
+				routeId: null, //created when added to a route
+				routeListId: null //created when added to a route
+			};
+		}
+		
+		// empty and fill rows in import table
+		$("#imported-locales").empty();
+		$("#imported-locales").append('<tr><th>ID</th><th>Last Name</th><th>First Name</th><th>Address</th><th>City</th><th>State</th><th>Zip</th><th>Route</th></tr>');
+		for (var id in locales) {
+			$("#imported-locales").append(
+				'<tr id="' + locales[id].importTableId + '">' 
+					+ '<td>' + locales[id].id + '</td>'
+					+ '<td>' + locales[id].lastName + '</td>'
+					+ '<td>' + locales[id].firstName + '</td>'
+					+ '<td>' + locales[id].address + '</td>'
+					+ '<td>' + locales[id].city + '</td>'
+					+ '<td>' + locales[id].state + '</td>'
+					+ '<td>' + locales[id].zip + '</td>'
+					+ '<td></td>'
+					+ '<td>[<a class="import-table-row-delete" href=# onclick="$(\'#' + locales[id].importTableId + '\').remove(); return false;">X</a>]</td>'
+				+ '</tr>'
+			);
+		}
+		
+				
+	}
+
+
+	// create markers on sort map
+	function createSortMapMarkers() {
+		var addresses = [];
+		
+		for (var id in locales) {
+			var locale = locales[id];
+			// get list of addresses to mark on the sort map
+			addresses.push( locale.fullAddress );
+			
+			// add locale to default route on first mapping
+			if (!locale.routeId) {
+				addLocaleToRoute( locale.id, 0 );
+			}
+
+			// clear sort map and delete markers
+			if (locale.sortMapMarker) {
+				locale.sortMapMarker.setMap(null);
+				locale.sortMapMarker = null;
+			}
+
+		}
+		
+		// create map markers for each address
+		icon = pushpinIcons.getShuffledPushpinIconUrl(0);
+		markerMapper.createAddressMarkers(sortMap, addresses, icon, function() {
+			// after all markers have been mapped...
+
+			for (var id in locales) {
+				var locale = locales[id];
+				var marker = markerMapper.markers[ locale.fullAddress ];
+				
+				// set marker content
+				marker.html = '<div>' + locale.lastName + ', ' + locale.firstName + '<br/>' + locale.fullAddress + '</div>';
+				
+				// link locale to marker
+				marker.localeId = locale.id;
+				
+				// save marker in its respective locale
+				locale.sortMapMarker = marker;
+				
+				// create marker single click event to display/hide info window
+				google.maps.event.addListener(marker, 'click', function() {
+					infoWindow.setContent(this.html);
+					infoWindow.open(sortMap, this);
+				});
+				
+				// create marker double click event to change route
+				google.maps.event.addListener(marker, "dblclick", function() {
+					infoWindow.close();
+					
+					// change marker icon
+					this.setIcon( selectedRoute.pushpinUrl );
+					
+					// get locale
+					var locale = locales[this.localeId];
+					
+					// change its route
+					changeLocaleToRoute( locale.id, selectedRoute.id );
+				});
+				
+			}
+			
+		});		
+	}
+
+	
+	//----------------------------------------------------------------
+
+	// data associated with routes
+	var routeCounter = 0;
+	var routes = new Array;
+	var selectedRoute = null;
+	
+	// create route
+	function createRoute() {
+		
+		// create new route data
+		var newRouteId = routeCounter++;
+		routes[newRouteId] = {
+			id: newRouteId,
+			name: 'Route ' + newRouteId,
+			pushpinUrl: pushpinIcons.getShuffledPushpinIconUrl(newRouteId),
+			map: null, //init after div creation
+			polyline: new google.maps.Polyline({
+			  path: [],
+			  strokeColor: '#FF0000',
+			  strokeWeight: 3
+			}),
+			mapId: 'route-map-' + newRouteId,
+			routeRadioButtionLabelId: 'route-radio-button-label-' + newRouteId,
+			routeRadioButtionId: 'route-radio-button-' + newRouteId,
+			routeOriginCheckboxId: 'route-origin-checkbox-' + newRouteId,
+			routeOriginLabelId: 'route-origin-label-' + newRouteId,
+			routeOriginTextId: 'route-origin-text-' + newRouteId,
+
+			routeDestinationCheckboxId: 'route-destination-checkbox-' + newRouteId,
+			routeDestinationLabelId: 'route-destination-label-' + newRouteId,
+			routeDestinationTextId: 'route-destination-text-' + newRouteId,
+			routeMapDurationId: 'route-duration-' + newRouteId,
+			routeMapDistanceId: 'route-distance-' + newRouteId,
+
+			routeTabListId: 'route-tab-ul-' + newRouteId,
+			routeTabId: 'route-tab-' + newRouteId,
+			routeMapLocalesId: 'route-map-locales-' + newRouteId,
+			routeMapDirectionsId: 'route-map-directions-' + newRouteId,
+			locales: new Array
+		};
+		var newRoute = routes[newRouteId];
+		
+		
+		// create new route select radio button in sort tab
+		$("#tab-sort #route-select").append(
+			'<input type="radio" name="route-radio-buttons" id="' + newRoute.routeRadioButtionId + '"></input>'
+			+'<label id="' + newRoute.routeRadioButtionLabelId + '" for="' + newRoute.routeRadioButtionId + '">'
+				+ '<img src="' + newRoute.pushpinUrl + '"/>'
+				+ newRoute.name + ' [<a href=# onclick="destroyRoute(' + newRoute.id + '); return false;">X</a>]'
+			+'</label>'
+		);
+		//$("#tab-sort #route-select").buttonset('refresh');
+		
+		
+		// create click event for new radio button
+		$("#"+newRoute.routeRadioButtionId).on( 'click', function(){
+			selectedRoute = newRoute;
+		});
+		// select this new route
+		$("#"+newRoute.routeRadioButtionId).click();
+
+
+		// create new route tab in route tab
+		$("#route-tabs #route-tabs-ul").append(
+			'<li id="' + newRoute.routeTabListId + '">'
+				+'<a href="#' + newRoute.routeTabId + '">' + newRoute.name + '</a>'
+			+'</li>'
+		);
+		$("#route-tabs").append('<div id="' + newRoute.routeTabId + '"></div>');
+		$("#route-tabs").tabs('refresh');
+		
+
+		// add 'Map Route Locations' button
+		$("#"+newRoute.routeTabId).append(
+			'<button id="' + newRoute.routeMapLocalesId + '">Map Route Locations</button>'
+		);
+		$("#"+newRoute.routeMapLocalesId).button();
+		$("#"+newRoute.routeMapLocalesId).on( 'click', function(){ createRouteMapMarkers(newRoute.id); });
+		
+
+		// add google map to route tab
+		$("#"+newRoute.routeTabId).append(
+			'<div id="' + newRoute.mapId + '" class="route-map"></div>'
+			+'<br/>'
+		);
+		newRoute.map = initGoogleMap(newRoute.mapId);
+		
+		
+		// add 'Map Route Directions' button
+		$("#"+newRoute.routeTabId).append(
+			'<button id="' + newRoute.routeMapDirectionsId + '">Map Route Directions</button>'
+		);
+		$("#"+newRoute.routeMapDirectionsId).button();
+		$("#"+newRoute.routeMapDirectionsId).on( 'click', function(){ createRouteMapDirections(newRoute.id); });
+
+		// add duration and distance metric
+		$("#"+newRoute.routeTabId).append(
+			' ( <span id="' + newRoute.routeMapDistanceId + '">0 miles </span>'
+			+' : <span id="' + newRoute.routeMapDurationId + '">0 minutes </span> )'
+			+'<br/><br/>'
+		);
+		
+		// add Origin checkbox and input
+		$("#"+newRoute.routeTabId).append(
+			'<input type="checkbox" id="' + newRoute.routeOriginCheckboxId + '"></input>'
+			+'<label id="' + newRoute.routeOriginLabelId + '" for="' + newRoute.routeOriginCheckboxId + '">Origin</label>'
+		);
+		$("#"+newRoute.routeTabId).append(
+			'<input type="text" id="' + newRoute.routeOriginTextId + '" value="433 Cambridge St, Cambridge, MA 02141"></input>'
+		);
+
+
+		// add locale list in route tab
+		$("#"+newRoute.routeTabId).append(
+			'<ol id="locales-list" style="list-style-type:decimal;">'
+				+'<!--locale list items inserted here-->'
+			+'</ol>'
+		);
+		$("#"+newRoute.routeTabId +" #locales-list").sortable({
+			placeholder: "ui-state-highlight",
+			
+			// update map marker icons when list is sorted
+			update: function(event, ui){
+				localeListIds = $(this).sortable('toArray');
+				for (var i=0; i<localeListIds.length; i++) {
+					var localeId = $("#"+localeListIds[i]).attr('localeId');
+					var locale = locales[localeId];
+					if (locale.routeMapMarker) {
+						locale.routeMapMarker.setIcon( pushpinIcons.getShuffledPushpinIconUrl( locale.routeId, i+1 ) );
+					}
+				}
+			}
+		});
+		$("#"+newRoute.routeTabId +" #locales-list").disableSelection();
+		
+		
+		// add Destination checkbox and input
+		$("#"+newRoute.routeTabId).append(
+			'<input type="checkbox" id="' + newRoute.routeDestinationCheckboxId + '"></input>'
+			+'<label id="' + newRoute.routeDestinationLabelId + '" for="' + newRoute.routeDestinationCheckboxId + '">Destination</label>'
+		);
+		$("#"+newRoute.routeTabId).append(
+			'<input type="text" id="' + newRoute.routeDestinationTextId + '" value="433 Cambridge St, Cambridge, MA 02141"></input>'
+		);
+
+		
+	}
+	
+	// destroy route
+	function destroyRoute(id) {
+		var route = routes[id];
+		$("#"+route.routeRadioButtionLabelId).remove();
+		$("#"+route.routeRadioButtionId).remove();
+		$("#"+route.routeTabListId).remove();
+		$("#"+route.routeTabId).remove();
+		routes[id] = null;
+	}	
+	
+	// add locale to route
+	function addLocaleToRoute( localeId, routeId ) {
+		var locale = locales[localeId];
+		var route = routes[routeId];
+		
+		// add locale reference to route and vise versa
+		locale.routeId = route.id;
+		locale.routeListId = 'route-locale-list-id-' + locale.id;
+		route.locales[locale.id] = locale;
+		
+		// add locale to route tab's sortable list
+		$("#"+route.routeTabId +" #locales-list").append(
+			'<li id="' + locale.routeListId + '" localeId="' + locale.id + '" class="ui-state-default">' 
+				+ locale.lastName + ', ' + locale.firstName + ' - ' + locale.fullAddress
+			+'</li>'
+		);
+		
+	}
+
+	// remove locale from route
+	function removeLocaleFromRoute( localeId, routeId ) {
+		var locale = locales[localeId];
+		var route = routes[routeId];
+		
+		// remove locale from list on route tab
+		$("#"+locale.routeListId).remove();
+		
+		// delete references
+		locale.routeId = null;
+		if(route.locales[locale.id]){
+			route.locales[locale.id] = null;
+		}
+		
+		// clean array
+		//route.locales = route.locales.filter(function(n){return n});
+	}
+	
+	// change locale to a new route
+	function changeLocaleToRoute( localeId, routeId ) {
+		var locale = locales[localeId];
+		if(locale.routeId != null){
+			removeLocaleFromRoute( locale.id, locale.routeId );
+		}
+		addLocaleToRoute( locale.id, routeId );
+	}
+	
+	// create markers on route map
+	function createRouteMapMarkers(routeId) {
+		var route = routes[routeId];
+
+		// remove markers from route map
+		for (var id in locales) {
+			if (locales[id]) {
+				if (locales[id].routeMapMarker) {
+					if (locales[id].routeMapMarker.map == route.map) {
+						locales[id].routeMapMarker.setMap(null);
+						locales[id].routeMapMarker = null;
+					}
+				}
+			}
+		}
+		
+		// get list of addresses to mark on the route map
+		var addresses = [];
+		for (var id in route.locales) {
+			if (route.locales[id]) {
+				addresses.push( route.locales[id].fullAddress );
+			}
+		}
+
+		// create map markers for each address on this route
+		var icon = pushpinIcons.getShuffledPushpinIconUrl(routeId);
+		markerMapper.createAddressMarkers(route.map, addresses, icon, function() {
+			// after all markers have been mapped...
+
+			// get sortable list indices of locales
+			var localeListIds = $("#"+route.routeTabId +" #locales-list").sortable('toArray');
+
+			for (var id in route.locales) {
+				if (route.locales[id]) {
+					var locale = route.locales[id];
+					var marker = markerMapper.markers[ locale.fullAddress ];
+
+					// set marker content
+					var orderIdx = $.inArray(locale.routeListId, localeListIds) + 1;
+					marker.setIcon( pushpinIcons.getShuffledPushpinIconUrl( routeId, orderIdx ) );
+					marker.html = '<div>' + locale.lastName + ', ' + locale.firstName + '<br/>' + locale.fullAddress + '</div>';
+
+					// link locale to marker
+					marker.localeId = locale.id;
+
+					// save marker in its respective locale
+					locale.routeMapMarker = marker;
+
+					// create marker single click event to display/hide info window
+					google.maps.event.addListener(marker, 'click', function() {
+						infoWindow.setContent(this.html);
+						infoWindow.open(routes[routeId].map, this);
+					});
+				}
+			}
+			
+		});
+		
+	}
+	
+	// create polyline directions on route map
+	function createRouteMapDirections(routeId) {
+		var route = routes[routeId];
+		
+		// get sortable list DOM indices of locales
+		var localeListIds = $("#"+route.routeTabId +" #locales-list").sortable('toArray');
+
+		// to save ordered list of addresses to map
+		var orderedAddresses = [];
+		
+		// add origin address is selected
+		if ( $("#"+route.routeOriginCheckboxId).prop('checked') ) {
+			orderedAddresses.push( $("#"+routes[0].routeOriginTextId).prop('value') );
+		}
+		
+		// add addresses in sortable list
+		for (idx in localeListIds) {
+			var localeId = $("#"+localeListIds[idx]).attr('localeId');
+			orderedAddresses.push( locales[localeId].fullAddress );
+		}
+
+		// add desitination address is selected
+		if ( $("#"+route.routeDestinationCheckboxId).prop('checked') ) {
+			orderedAddresses.push( $("#"+routes[0].routeDestinationTextId).prop('value') );
+		}
+
+		// reset poyline for the route map
+		route.polyline.setMap(null);
+		route.polyline = new google.maps.Polyline({
+		  path: [],
+		  strokeColor: '#FF0000',
+		  strokeWeight: 3
+		})
+		
+		// map route
+		directionsMapper.mapRoute(route.map, route.polyline, orderedAddresses, function() {
+			$("#"+route.routeMapDistanceId).text( Math.round(directionsMapper.routeDistance/1609.34) + ' miles' );
+			$("#"+route.routeMapDurationId).text( Math.round(directionsMapper.routeDuration/60) + ' minutes' );
+		});
+	}
+	
+	
+	//----------------------------------------------------------------
+
+	// data associated with delivery items
+	var items = null;
+
+	// import items
+	function importItems() {
+
+		// get csv text
+		var csvText = $("#items-csv-text").val();
+		
+		// convert csv to array of objects
+		var csvRows = $.csv.toObjects(csvText);
+		
+		// init locales var
+		items = new Array;
+		
+		// create new items
+		for (var i=0; i<csvRows.length; i++) {
+			if (csvRows[i]['ITEM'] 
+			&& (csvRows[i]['CATEGORY'] != 'Option')
+			&& (csvRows[i]['STATUS'] == 'Published') ) {
+				items.push({
+					name: csvRows[i]['ITEM'],
+					category: csvRows[i]['CATEGORY'],
+					status: csvRows[i]['STATUS'],
+					producer: csvRows[i]['PRODUCER']
+				});
+				
+			}
+		}
+	}
+
+
+	// data associated with delivery orders
+	var orders = null;
+
+	// import locales
+	function importOrders() {
+
+		// get csv text
+		var csvText = $("#orders-csv-text").val();
+		
+		// convert csv to array of objects
+		var csvRows = $.csv.toObjects(csvText);
+		
+		// init locales var
+		orders = new Array;
+		
+		// create new items
+		for (var i=0; i<csvRows.length; i++) {
+			if ( csvRows[i]['ID'] && csvRows[i]['First Name'] && csvRows[i]['Last Name'] ) {
+				orders[csvRows[i]['ID']] = csvRows[i];
+			}
+		}
+		
+		// find item keys in order
+		var orderKeys = Object.keys(orders[1]);
+		var itemNames = [];
+		for (var i in items) {
+			itemNames.push(items[i].name)
+		}
+
+		var orderItemKeys = [];
+		for (var i in orderKeys) {
+			var orderKey = orderKeys[i];
+			for (var j in itemNames) {
+				var itemName = itemNames[j];
+				if (orderKey.indexOf(itemName) != -1) {
+					orderItemKeys.push(orderKey);
+				}
+			}
+		}
+		
+		// find valid orders
+		var validOrders = [];
+		for (var id in orders) {
+			if (orders[id]) {
+				var order = orders[id];
+				var orderItemsSum = 0;
+				for (var i in orderItemKeys) {
+					var key = orderItemKeys[i];
+					orderItemsSum += order[key];
+				}
+				console.log(orderItemsSum);
+				if (orderItemsSum != 0) {
+					console.log(order);
+					validOrders.push(order);
+				}
+			}
+		}
+		
+		
+	}
+	
+	
+	//
+	function printLabels() {
+		$("#tabs").hide();
+		$("#labels").show();
+		
+		
+	}
+
+	
+	//
+	function closeLabels() {
+		$("#labels").hide();
+		$("#tabs").show();
+	}
+	
+	//----------------------------------------------------------------
+
+	// init ui
+	$(function() {
+		
+		// init tabs
+		$("#tabs").tabs({
+			// resize sort map because it's hidden on initialization
+			activate: function( event, ui ) {
+				google.maps.event.trigger( sortMap, 'resize' );
+				sortMap.setCenter(bostonLatLng); 
+			}
+		});
+		$("#route-tabs").tabs({
+			// resize route maps because they're hidden on initialization
+			activate: function( event, ui ) {
+				for (var id in routes) {
+					if(routes[id]){
+						google.maps.event.trigger( routes[id].map, 'resize' );
+						routes[id].map.setCenter(bostonLatLng); 
+					}
+				}
+			}
+		});
+				
+		// button to import locales csv text
+		$("#import-locales-csv-button").button();
+		$("#import-locales-csv-button").on('click', function(){ importLocales(); });
+
+		// button to mark imported locales on sort map
+		$("#map-locales-button").button();
+		$("#map-locales-button").on( 'click', function(){ createSortMapMarkers(); });
+		
+		// radio buttons to select route - can't add dynamically!!!
+		//$("#tab-sort #route-select").buttonset();
+		
+		// button to add a new route
+		$("#add-route-button").button();
+		$("#add-route-button").on( 'click', function(){ createRoute(); } );
+		
+		// create default route
+		createRoute();
+		
+		// button to import items csv text
+		$("#import-items-csv-button").button();
+		$("#import-items-csv-button").on('click', function(){ importItems(); });
+
+		// button to import orders csv text
+		$("#import-orders-csv-button").button();
+		$("#import-orders-csv-button").on('click', function(){ importOrders(); });
+		
+		// button to show labels for a route
+		$("#print-labels-button").button();
+		$("#print-labels-button").on('click', function(){ printLabels(); });
+
+		// button to hide labes
+		$("#close-labels-button").button();
+		$("#close-labels-button").on('click', function(){ closeLabels(); });
+
+		
+	});
+	
+	
+	
+	
+
+	</script>
+
+</head>
+
+<!--********************************************************-->
+<body>
+ 
+<div id="tabs">
+	
+	<!--main tabs list-->
+	<ul>
+		<li><a href="#tab-import">Import</a></li>
+		<li><a href="#tab-sort">Sort</a></li>
+		<li><a href="#tab-route">Route</a></li>
+		<li><a href="#tab-label">Labels</a></li>
+	</ul>
+
+
+	<!--import tab-->
+	<div id="tab-import">
+		Locations to import:
+		<textarea id="locales-csv-text" style="width:100%; max-width:100%; heigth:150px;">ID,Last Name,First Name,Address,City,State,Zip Code</textarea>
+		<input type="submit" id="import-locales-csv-button" name="import-locales-csv-button" value="Import Delivery Locations" onclick="return false;"/>
+		<br/><br/>
+		
+		Imported Locations:
+		<table id="imported-locales">
+			<!--locale rows inserted here-->
+		</table>
+	</div>
+
+
+	<!--sort tab-->
+	<div id="tab-sort">
+		<button id="map-locales-button">Map Imported Locations</button>
+		<div id="sort-map-canvas"></div>
+		<br/>
+		<button id="add-route-button">Add Route</button>
+		<div id="route-select">
+			<!--route select radio buttons inserted here-->
+		</div>
+	</div>
+
+
+	<!--route tab-->
+	<div id="tab-route">
+		<div id="route-tabs">
+			<ul id="route-tabs-ul">
+				<!--tabs list items inserted here-->
+			</ul>
+			<!--tabs divs inserted here-->
+		</div>
+	</div>
+
+
+	<!--label tab-->
+	<div id="tab-label">
+		Items to import:
+		<textarea id="items-csv-text" style="width:100%; max-width:100%; heigth:100px;"></textarea>
+		<input type="submit" id="import-items-csv-button" name="import-items-csv-button" value="Import Items" onclick="return false;"/>
+		<br/><br/>
+		
+		Orders to import:
+		<textarea id="orders-csv-text" style="width:100%; max-width:100%; heigth:100px;"></textarea>
+		<input type="submit" id="import-orders-csv-button" name="import-orders-csv-button" value="Import Orders" onclick="return false;"/>
+		<br/><br/>
+
+		<input type="submit" id="print-labels-button" name="print-labels-button" value="Print Labels" onclick="return false;"/>
+		<br/><br/>
+
+		Imported Items:
+		<table id="imported-items">
+			<!--item rows inserted here-->
+		</table>
+		<br/><br/>
+
+		Imported Orders:
+		<table id="imported-orders">
+			<!--order rows inserted here-->
+		</table>
+	</div>
+
+</div>
+
+<div id="labels" style="display:none;">
+	
+	<input type="submit" id="close-labels-button" name="close-labels-button" value="Close Labels" onclick="return false;"/>
+	<br/><br/>
+
+	<p>Page 1</p>
+	<p style="page-break-after:always;"></p>
+	<div class="page-break"></div>
+	
+	<p>Page 2</p>
+	<p style="page-break-after:always;"></p>
+	<div class="page-break"></div>
+
+	<p>Page 3</p>
+	<p style="page-break-after:always;"></p>
+	<div class="page-break"></div>
+
+	<p>Page 4</p>
+</div>
+ 
+ 
+</body>
+</html>
